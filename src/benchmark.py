@@ -11,6 +11,7 @@ tiempo medido corresponda únicamente al algoritmo de búsqueda de vecinos
 y no a la generación del sistema.
 """
 
+import time
 from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -64,6 +65,7 @@ def experimento_variacion_M(
     r_max: float,
     n_repeticiones: int = 100,
     seed: Optional[int] = None,
+    max_intentos: int = 100_000,
 ) -> pd.DataFrame:
     """Mide el tiempo del CIM en función de M, con N fijo (punto 3 del TP).
 
@@ -78,11 +80,16 @@ def experimento_variacion_M(
         r_max: Cota superior del radio de las partículas.
         n_repeticiones: Repeticiones por cada valor de M.
         seed: Semilla para la generación de partículas.
+        max_intentos: Límite de intentos de rejection sampling que se le
+            pasa a `generar_particulas` (relevante para N altos, cercanos
+            al límite práctico de generación).
 
     Returns:
         DataFrame con columnas: M, tiempo_promedio, tiempo_std.
     """
-    resultado = generar_particulas(n, lado=l, r_min=r_min, r_max=r_max, seed=seed)
+    resultado = generar_particulas(
+        n, lado=l, r_min=r_min, r_max=r_max, seed=seed, max_intentos=max_intentos
+    )
     posiciones = resultado["posiciones"]
     radios = resultado["radios"]
 
@@ -90,9 +97,17 @@ def experimento_variacion_M(
 
     filas = []
     for m in range(1, m_max + 1):
+        t0_punto = time.perf_counter()
         args_busqueda = (posiciones, radios, l, m, rc)
         promedio, std = correr_experimento_repetido(
             buscar_vecinos_cim, args_busqueda, n_repeticiones
+        )
+        tiempo_punto = time.perf_counter() - t0_punto
+        print(
+            f"    [experimento_variacion_M] N={n}: M={m}/{m_max} listo "
+            f"({tiempo_punto:.2f}s para {n_repeticiones} repeticiones, "
+            f"promedio={promedio:.6f}s)",
+            flush=True,
         )
         filas.append({"M": m, "tiempo_promedio": promedio, "tiempo_std": std})
 
@@ -108,6 +123,7 @@ def experimento_variacion_N(
     m: Optional[int] = None,
     n_repeticiones: int = 100,
     seed: Optional[int] = None,
+    max_intentos: int = 100_000,
 ) -> pd.DataFrame:
     """Mide el tiempo del CIM en función de N, con L fijo (punto 4 del TP).
 
@@ -121,6 +137,9 @@ def experimento_variacion_N(
             óptimo (`calcular_M_max`) para cada N.
         n_repeticiones: Repeticiones por cada valor de N.
         seed: Semilla para la generación de partículas.
+        max_intentos: Límite de intentos de rejection sampling que se le
+            pasa a `generar_particulas` (relevante para N altos, cercanos
+            al límite práctico de generación).
 
     Returns:
         DataFrame con columnas: N, M_usado, tiempo_promedio, tiempo_std,
@@ -129,13 +148,22 @@ def experimento_variacion_N(
         `alcanzado=False` y los tiempos en NaN, sin interrumpir el resto
         del experimento.
     """
+    valores_n = list(valores_n)
     filas = []
 
-    for n in valores_n:
+    for idx_n, n in enumerate(valores_n, start=1):
+        t0_punto = time.perf_counter()
         densidad = calcular_densidad(n, l)
         try:
-            resultado = generar_particulas(n, lado=l, r_min=r_min, r_max=r_max, seed=seed)
+            resultado = generar_particulas(
+                n, lado=l, r_min=r_min, r_max=r_max, seed=seed, max_intentos=max_intentos
+            )
         except GeneracionParticulasError:
+            print(
+                f"    [experimento_variacion_N] N={n} ({idx_n}/{len(valores_n)}): "
+                f"no se pudo generar (densidad={densidad:.4f}), se omite",
+                flush=True,
+            )
             filas.append(
                 {
                     "N": n,
@@ -155,6 +183,14 @@ def experimento_variacion_N(
         args_busqueda = (posiciones, radios, l, m_usado, rc)
         promedio, std = correr_experimento_repetido(
             buscar_vecinos_cim, args_busqueda, n_repeticiones
+        )
+
+        tiempo_punto = time.perf_counter() - t0_punto
+        print(
+            f"    [experimento_variacion_N] N={n} ({idx_n}/{len(valores_n)}) listo "
+            f"(M_usado={m_usado}, {tiempo_punto:.2f}s totales para este punto, "
+            f"promedio_busqueda={promedio:.6f}s)",
+            flush=True,
         )
 
         filas.append(
@@ -181,6 +217,7 @@ def experimento_variacion_N_densidad_fija(
     m: Optional[int] = None,
     n_repeticiones: int = 100,
     seed: Optional[int] = None,
+    max_intentos: int = 100_000,
 ) -> pd.DataFrame:
     """Mide el tiempo del CIM escalando N y L juntos, a densidad constante
     (punto 4.2 del TP): densidad = N_inicial / L_inicial^2.
@@ -200,6 +237,9 @@ def experimento_variacion_N_densidad_fija(
             óptimo (`calcular_M_max`) para cada punto.
         n_repeticiones: Repeticiones por cada factor de escala.
         seed: Semilla para la generación de partículas.
+        max_intentos: Límite de intentos de rejection sampling que se le
+            pasa a `generar_particulas` (relevante para N altos, cercanos
+            al límite práctico de generación).
 
     Returns:
         DataFrame con columnas: N, L, factor_escala, M_usado,
@@ -207,18 +247,31 @@ def experimento_variacion_N_densidad_fija(
         salida que `experimento_variacion_N`, con L y factor_escala como
         columnas adicionales de contexto).
     """
+    factores_escala = list(factores_escala)
     filas = []
 
-    for factor in factores_escala:
+    for idx_factor, factor in enumerate(factores_escala, start=1):
+        t0_punto = time.perf_counter()
         l_actual = l_inicial * factor
         n_actual = int(round(n_inicial * factor**2))
         densidad = calcular_densidad(n_actual, l_actual)
 
         try:
             resultado = generar_particulas(
-                n_actual, lado=l_actual, r_min=r_min, r_max=r_max, seed=seed
+                n_actual,
+                lado=l_actual,
+                r_min=r_min,
+                r_max=r_max,
+                seed=seed,
+                max_intentos=max_intentos,
             )
         except GeneracionParticulasError:
+            print(
+                f"    [experimento_variacion_N_densidad_fija] factor={factor:.3f} "
+                f"({idx_factor}/{len(factores_escala)}), N={n_actual}: no se pudo "
+                f"generar (densidad={densidad:.4f}), se omite",
+                flush=True,
+            )
             filas.append(
                 {
                     "N": n_actual,
@@ -240,6 +293,15 @@ def experimento_variacion_N_densidad_fija(
         args_busqueda = (posiciones, radios, l_actual, m_usado, rc)
         promedio, std = correr_experimento_repetido(
             buscar_vecinos_cim, args_busqueda, n_repeticiones
+        )
+
+        tiempo_punto = time.perf_counter() - t0_punto
+        print(
+            f"    [experimento_variacion_N_densidad_fija] factor={factor:.3f} "
+            f"({idx_factor}/{len(factores_escala)}), N={n_actual} listo "
+            f"(M_usado={m_usado}, {tiempo_punto:.2f}s totales, "
+            f"promedio_busqueda={promedio:.6f}s)",
+            flush=True,
         )
 
         filas.append(
