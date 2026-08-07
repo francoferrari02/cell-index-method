@@ -97,13 +97,19 @@ def graficar_particulas(
     return ax
 
 
+_EXTENSIONES_VALIDAS = {".png", ".jpg", ".jpeg", ".pdf", ".svg", ".eps", ".tif", ".tiff"}
+
+
 def guardar_figura(fig: Figure, nombre: str, carpeta: str = "figures") -> str:
     """Guarda una figura de matplotlib en disco con buena resolución.
 
     Args:
         fig: Figura de matplotlib a guardar.
-        nombre: Nombre del archivo a generar (con o sin extensión; si no
-            tiene extensión se usa .png por defecto).
+        nombre: Nombre del archivo a generar (con o sin extensión de
+            imagen; si no termina en una extensión reconocida se le
+            agrega .png). Nombres con puntos que no forman una extensión
+            de imagen válida (por ejemplo "rc1.0") no se confunden con
+            una extensión.
         carpeta: Carpeta donde guardar la figura. Se crea si no existe.
 
     Returns:
@@ -111,7 +117,8 @@ def guardar_figura(fig: Figure, nombre: str, carpeta: str = "figures") -> str:
     """
     os.makedirs(carpeta, exist_ok=True)
 
-    if not os.path.splitext(nombre)[1]:
+    extension = os.path.splitext(nombre)[1].lower()
+    if extension not in _EXTENSIONES_VALIDAS:
         nombre = f"{nombre}.png"
 
     path = os.path.join(carpeta, nombre)
@@ -121,10 +128,12 @@ def guardar_figura(fig: Figure, nombre: str, carpeta: str = "figures") -> str:
 
 
 if __name__ == "__main__":
+    from src.cim import buscar_vecinos_cim, calcular_M_max
     from src.particles import generar_particulas
 
     n = 30
     lado = 10.0
+    rc = 1.0
     resultado = generar_particulas(n, lado=lado, seed=42)
     posiciones = resultado["posiciones"]
     radios = resultado["radios"]
@@ -132,10 +141,9 @@ if __name__ == "__main__":
     rng = np.random.default_rng(42)
     particula_id = int(rng.integers(0, n))
 
-    distancias = np.hypot(*(posiciones - posiciones[particula_id]).T)
-    orden = np.argsort(distancias)
-    orden = orden[orden != particula_id]
-    vecinos_ejemplo: List[int] = orden[:4].tolist()
+    m = calcular_M_max(lado, rc, float(radios.max()))
+    vecinos_por_particula = buscar_vecinos_cim(posiciones, radios, lado, m, rc)
+    vecinos_ejemplo: List[int] = vecinos_por_particula[particula_id]
 
     ax = graficar_particulas(
         posiciones,
@@ -144,8 +152,8 @@ if __name__ == "__main__":
         particula_id=particula_id,
         vecinos=vecinos_ejemplo,
         mostrar_grilla=True,
-        m=5,
-        titulo=f"Ejemplo: partícula {particula_id} y sus vecinas más cercanas",
+        m=m,
+        titulo=f"Ejemplo: partícula {particula_id} y sus vecinas (rc={rc}, M={m})",
     )
 
     path_generado = guardar_figura(ax.figure, "ejemplo_visualize")
