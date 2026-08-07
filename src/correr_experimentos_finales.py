@@ -66,8 +66,8 @@ SEED = 42
 N_MAX = 1140
 N_INTERMEDIO_P3 = N_MAX // 2  # 570
 
-N_REPETICIONES_P3 = 300
-N_REPETICIONES_P4 = 200
+N_REPETICIONES_P3 = 1000
+N_REPETICIONES_P4 = 1000
 
 # El default de generar_particulas (100_000 intentos) no alcanza para
 # N cercanos a N_MAX=1140 en L=20: en explorar_n_max.py hizo falta un
