@@ -1,6 +1,6 @@
 # TP1 - Cell Index Method (CIM)
 
-Trabajo Práctico N°1 de la materia **Simulación de Sistemas** (72.25, FIUBA).
+Trabajo Práctico N°1 de la materia **Simulación de Sistemas** .
 
 ## Objetivo
 
@@ -45,4 +45,3 @@ sds-tp1-cim/
 
 ## Uso
 
-_(Sección a completar más adelante con instrucciones de ejecución)_
