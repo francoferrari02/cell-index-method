@@ -119,38 +119,69 @@ def construir_celdas(
 _OFFSETS_VECINOS = [(0, 1), (1, -1), (1, 0), (1, 1)]
 
 
-def _distancia_borde_borde(
-    pos_i: np.ndarray,
-    pos_j: np.ndarray,
-    r_i: float,
-    r_j: float,
+def _matriz_distancia_borde_borde(
+    pos_a: np.ndarray,
+    radios_a: np.ndarray,
+    pos_b: np.ndarray,
+    radios_b: np.ndarray,
     l: float,
     periodic: bool,
-) -> float:
-    """Calcula la distancia borde-borde entre dos partículas."""
-    delta = pos_i - pos_j
+) -> np.ndarray:
+    """Matriz (len(pos_a), len(pos_b)) de distancias borde-borde, vectorizada.
+
+    Calcula todas las distancias centro-centro entre los dos conjuntos de
+    partículas de una sola vez (broadcasting), y les resta la suma de
+    radios correspondiente.
+    """
+    delta = pos_a[:, None, :] - pos_b[None, :, :]  # (na, nb, 2)
     if periodic:
         delta = delta - l * np.round(delta / l)
-    distancia_centros = math.hypot(delta[0], delta[1])
-    return distancia_centros - (r_i + r_j)
+    distancia_centros = np.linalg.norm(delta, axis=-1)  # (na, nb)
+    return distancia_centros - (radios_a[:, None] + radios_b[None, :])
 
 
-def _agregar_par_si_vecino(
-    i: int,
-    j: int,
+def _pares_vecinos_entre_conjuntos(
+    indices_a: np.ndarray,
+    indices_b: np.ndarray,
     posiciones: np.ndarray,
     radios: np.ndarray,
     l: float,
     rc: float,
     periodic: bool,
-    vecinos: Dict[int, List[int]],
-) -> None:
-    dist_borde = _distancia_borde_borde(
-        posiciones[i], posiciones[j], radios[i], radios[j], l, periodic
+    misma_celda: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Encuentra, de forma vectorizada, los pares vecinos entre dos
+    conjuntos de índices de partículas (por ejemplo, dos celdas, o toda
+    la nube de partículas contra sí misma en el caso de fuerza bruta).
+
+    Args:
+        indices_a, indices_b: arrays de índices globales de partículas.
+        misma_celda: True si indices_a e indices_b son el mismo conjunto
+            (hay que anular la diagonal para no auto-comparar una
+            partícula consigo misma, y quedarse solo con el triángulo
+            superior para no duplicar cada par).
+
+    Returns:
+        (indices_i, indices_j): arrays de índices globales de los pares
+        vecinos encontrados (mismo largo cada uno).
+    """
+    if indices_a.size == 0 or indices_b.size == 0:
+        vacio = np.empty(0, dtype=int)
+        return vacio, vacio
+    if misma_celda and indices_a.size < 2:
+        vacio = np.empty(0, dtype=int)
+        return vacio, vacio
+
+    dist_borde = _matriz_distancia_borde_borde(
+        posiciones[indices_a], radios[indices_a], posiciones[indices_b], radios[indices_b], l, periodic
     )
-    if dist_borde < rc:
-        vecinos[i].append(j)
-        vecinos[j].append(i)
+    mascara = dist_borde < rc
+
+    if misma_celda:
+        mascara = np.triu(mascara, k=1)  # anula diagonal y triángulo inferior
+
+    filas, cols = np.nonzero(mascara)
+    return indices_a[filas], indices_b[cols]
 
 
 def buscar_vecinos_cim(
@@ -210,11 +241,15 @@ def buscar_vecinos_cim(
     pares_celdas_procesados = set()
 
     for (fila, col), indices_celda in celdas.items():
-        # Pares dentro de la misma celda (i < j para no duplicar).
-        for a in range(len(indices_celda)):
-            for b in range(a + 1, len(indices_celda)):
-                i, j = indices_celda[a], indices_celda[b]
-                _agregar_par_si_vecino(i, j, posiciones, radios, l, rc, periodic, vecinos)
+        indices_celda_arr = np.asarray(indices_celda, dtype=int)
+
+        # Pares dentro de la misma celda (vectorizado, i < j para no duplicar).
+        idx_i, idx_j = _pares_vecinos_entre_conjuntos(
+            indices_celda_arr, indices_celda_arr, posiciones, radios, l, rc, periodic, misma_celda=True
+        )
+        for i, j in zip(idx_i.tolist(), idx_j.tolist()):
+            vecinos[i].append(j)
+            vecinos[j].append(i)
 
         # Pares contra celdas vecinas (semi-stencil "hacia adelante").
         celda_actual = (fila, col)
@@ -244,9 +279,20 @@ def buscar_vecinos_cim(
             if not indices_vecina:
                 continue
 
-            for i in indices_celda:
-                for j in indices_vecina:
-                    _agregar_par_si_vecino(i, j, posiciones, radios, l, rc, periodic, vecinos)
+            indices_vecina_arr = np.asarray(indices_vecina, dtype=int)
+            idx_i, idx_j = _pares_vecinos_entre_conjuntos(
+                indices_celda_arr,
+                indices_vecina_arr,
+                posiciones,
+                radios,
+                l,
+                rc,
+                periodic,
+                misma_celda=False,
+            )
+            for i, j in zip(idx_i.tolist(), idx_j.tolist()):
+                vecinos[i].append(j)
+                vecinos[j].append(i)
 
     return vecinos
 
@@ -265,6 +311,12 @@ def buscar_vecinos_fuerza_bruta(
     (equivalente al caso M=1 del CIM). Se usa como referencia para
     verificar la correctitud del CIM.
 
+    La matriz de distancias se calcula vectorizada con numpy
+    (broadcasting), no con un loop anidado de Python: para N grande, un
+    loop puro sobre C(N,2) pares es el cuello de botella dominante (por
+    ejemplo, ~0.55s para N=1140 con el loop de Python vs. milisegundos
+    vectorizado).
+
     Args:
         posiciones: Array (N, 2) con las coordenadas (x, y) de cada
             partícula.
@@ -280,9 +332,16 @@ def buscar_vecinos_fuerza_bruta(
     n = len(posiciones)
     vecinos: Dict[int, List[int]] = {i: [] for i in range(n)}
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            _agregar_par_si_vecino(i, j, posiciones, radios, l, rc, periodic, vecinos)
+    if n < 2:
+        return vecinos
+
+    todos_los_indices = np.arange(n)
+    idx_i, idx_j = _pares_vecinos_entre_conjuntos(
+        todos_los_indices, todos_los_indices, posiciones, radios, l, rc, periodic, misma_celda=True
+    )
+    for i, j in zip(idx_i.tolist(), idx_j.tolist()):
+        vecinos[i].append(j)
+        vecinos[j].append(i)
 
     return vecinos
 

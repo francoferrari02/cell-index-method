@@ -1,5 +1,7 @@
 """Tests para el módulo src.cim."""
 
+import time
+
 import numpy as np
 import pytest
 
@@ -153,3 +155,28 @@ def test_periodico_vecinas_por_borde_opuesto():
     periodico_cim = buscar_vecinos_cim(posiciones, radios, lado, m=5, rc=rc, periodic=True)
     assert periodico_cim[0] == [1]
     assert periodico_cim[1] == [0]
+
+
+def test_buscar_vecinos_cim_m1_es_rapido_para_n_grande():
+    """Regresión de performance: buscar_vecinos_cim con M=1 (fuerza bruta
+    vía CIM) para N=1140 debe estar vectorizado, no ser un loop de Python
+    puro sobre ~650k pares.
+
+    Antes de vectorizar la comparación de distancias (ver diagnóstico:
+    doble for en Python puro llamando a una función auxiliar por par),
+    esta llamada tardaba ~0.55s. Vectorizada con numpy debería tardar
+    milisegundos; se deja un margen amplio (0.05s, ~10x el tiempo
+    vectorizado esperado) para no hacer el test frágil ante variaciones
+    de hardware, pero sigue detectando si se reintroduce un loop puro.
+    """
+    lado, rc = 20.0, 1.0
+    particulas = generar_particulas(
+        1140, lado=lado, r_min=0.23, r_max=0.26, seed=42, max_intentos=2_000_000
+    )
+    posiciones, radios = particulas["posiciones"], particulas["radios"]
+
+    inicio = time.perf_counter()
+    buscar_vecinos_cim(posiciones, radios, lado, m=1, rc=rc)
+    tiempo = time.perf_counter() - inicio
+
+    assert tiempo < 0.05, f"buscar_vecinos_cim(M=1) tardó {tiempo:.4f}s (esperado < 0.05s)"
