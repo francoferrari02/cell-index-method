@@ -184,29 +184,116 @@ def _pares_vecinos_entre_conjuntos(
     return indices_a[filas], indices_b[cols]
 
 
-def _pares_indices_intra_celda(indices_celda_arr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Índices globales de todos los pares i < j dentro de una misma celda.
+def _mapa_celdas_vecinas(m: int, periodic: bool) -> List[np.ndarray]:
+    """Para cada una de las M² celdas y cada offset del semi-stencil,
+    calcula el id de la celda vecina correspondiente (o -1 si no aplica).
 
-    Solo genera índices (barato); no calcula ninguna distancia.
+    Esto se calcula una sola vez sobre la grilla de celdas (tamaño M², no
+    N): la parte pesada es vectorizada con numpy, y el único loop de
+    Python puro recorre la grilla de celdas (a lo sumo M² <= 169²
+    entradas en total contando las 4 direcciones), nunca las N partículas
+    ni pares de partículas, así que su costo no escala con N.
+
+    Un offset se invalida (-1) si cae fuera de la grilla (caso no
+    periódico), si coincide con la celda propia, o si el PAR de celdas
+    {origen, destino} ya fue cubierto por otro offset (de esta celda o de
+    la celda vecina): con M chico y condiciones periódicas, el wraparound
+    puede hacer que dos offsets distintos —incluso de celdas origen
+    distintas— colisionen en el mismo par de celdas, y hay que dedupear
+    ese par a nivel global (no alcanza con mirar solo los offsets de la
+    misma celda origen).
+
+    Returns:
+        Lista de 4 arrays (uno por offset), cada uno de tamaño M², con el
+        id de celda vecina (fila*M + col) o -1.
     """
-    k = indices_celda_arr.size
-    if k < 2:
+    n_celdas = m * m
+    cell_id = np.arange(n_celdas)
+    fila = cell_id // m
+    col = cell_id % m
+
+    mapa: List[np.ndarray] = []
+    for d_fila, d_col in _OFFSETS_VECINOS:
+        fila_v = fila + d_fila
+        col_v = col + d_col
+
+        if periodic:
+            fila_v = fila_v % m
+            col_v = col_v % m
+            valido = np.ones(n_celdas, dtype=bool)
+        else:
+            valido = (fila_v >= 0) & (fila_v < m) & (col_v >= 0) & (col_v < m)
+
+        objetivo = np.where(valido, fila_v * m + col_v, -1)
+        objetivo = np.where(objetivo == cell_id, -1, objetivo)  # descarta autovecindad
+        mapa.append(objetivo)
+
+    # Dedup global de pares de celdas: a lo sumo 4*M² entradas (chico,
+    # independiente de N), así que un loop de Python puro acá es barato.
+    pares_procesados: set = set()
+    for objetivo in mapa:
+        for c in range(n_celdas):
+            t = int(objetivo[c])
+            if t == -1:
+                continue
+            par = frozenset((c, t))
+            if par in pares_procesados:
+                objetivo[c] = -1
+            else:
+                pares_procesados.add(par)
+
+    return mapa
+
+
+def _expandir_pares_hacia_celda(
+    idx_particulas: np.ndarray,
+    celda_objetivo: np.ndarray,
+    starts: np.ndarray,
+    ends: np.ndarray,
+    orden: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Para cada partícula en `idx_particulas`, arma el par (partícula,
+    vecino_candidato) contra TODAS las partículas de su celda objetivo,
+    para todas las partículas a la vez, sin loop de Python por celda.
+
+    Args:
+        idx_particulas: índices globales de las partículas fuente.
+        celda_objetivo: id de celda objetivo para cada partícula fuente
+            (mismo largo que idx_particulas); -1 descarta esa partícula.
+        starts, ends: para cada id de celda (0..M²-1), rango [start, end)
+            en `orden` donde están las partículas de esa celda (grilla
+            armada una sola vez con argsort + bincount, no por celda).
+        orden: índices globales de las partículas, ordenados por celda.
+
+    Returns:
+        (idx_i, idx_j): pares candidatos (mismo largo cada uno). No se
+        calcula ninguna distancia acá.
+    """
+    validas = celda_objetivo >= 0
+    idx_fuente = idx_particulas[validas]
+    if idx_fuente.size == 0:
         vacio = np.empty(0, dtype=int)
         return vacio, vacio
-    i_local, j_local = np.triu_indices(k, k=1)
-    return indices_celda_arr[i_local], indices_celda_arr[j_local]
 
+    celdas_obj = celda_objetivo[validas]
+    s = starts[celdas_obj]
+    cuentas = ends[celdas_obj] - s
+    total = int(cuentas.sum())
+    if total == 0:
+        vacio = np.empty(0, dtype=int)
+        return vacio, vacio
 
-def _pares_indices_entre_celdas(
-    indices_a: np.ndarray, indices_b: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Índices globales de todos los pares (a, b) entre dos celdas distintas.
+    idx_i = np.repeat(idx_fuente, cuentas)
 
-    Producto cartesiano de índices vía repeat/tile (mucho más liviano que
-    np.meshgrid para arrays chicos, que es lo típico por celda); tampoco
-    calcula distancias, solo arma los pares candidatos.
-    """
-    return np.repeat(indices_a, indices_b.size), np.tile(indices_b, indices_a.size)
+    # Expansión de rangos "ragged" (de largo variable) sin loop de Python:
+    # para la partícula k-ésima, su bloque de vecinos candidatos ocupa
+    # `cuentas[k]` posiciones consecutivas en `orden`, empezando en s[k].
+    inicio_bloque = np.cumsum(cuentas) - cuentas
+    posicion_local = np.arange(total) - np.repeat(inicio_bloque, cuentas)
+    posiciones = np.repeat(s, cuentas) + posicion_local
+    idx_j = orden[posiciones]
+
+    return idx_i, idx_j
 
 
 def buscar_vecinos_cim(
@@ -222,15 +309,23 @@ def buscar_vecinos_cim(
     Dos partículas i, j son vecinas si su distancia borde-borde
     (||centro_i - centro_j|| - (r_i + r_j)) es menor a rc.
 
-    Implementación: primero se recorren las celdas para armar la lista
-    completa de pares candidatos (i, j) de todo el sistema (solo indexado,
-    sin calcular ninguna distancia todavía), y recién al final se hace
-    **una única** operación vectorizada de numpy sobre todos los
-    candidatos juntos. Esto evita pagar el overhead fijo de una llamada a
-    numpy por cada una de las M² celdas: con M grande cada celda tiene
-    pocas partículas, y ese overhead por-celda (no por-partícula) puede
-    dominar sobre el ahorro real de trabajo aritmético si se calculan las
-    distancias celda por celda.
+    Implementación completamente vectorizada, sin ningún loop de Python
+    sobre las M² celdas (solo un loop constante de 4 iteraciones, una por
+    offset del semi-stencil). La grilla se arma una sola vez con
+    `argsort`/`bincount` (no con un diccionario poblado partícula por
+    partícula), y los pares candidatos de cada offset se expanden con
+    operaciones de numpy sobre TODAS las partículas a la vez (ver
+    `_expandir_pares_hacia_celda`). Recién al final se hace una única
+    pasada vectorizada de cálculo de distancias sobre todos los
+    candidatos juntos.
+
+    Esto importa porque una implementación que recorre las M² celdas en
+    Python y llama a numpy por cada una paga un overhead fijo por
+    celda (no por partícula): con M grande cada celda tiene pocas
+    partículas, y ese overhead terminaba dominando sobre el ahorro real
+    de trabajo aritmético, haciendo que el tiempo volviera a subir cerca
+    de M_max en vez de seguir bajando. Al eliminar el loop por celda, el
+    tiempo baja monótonamente con M (menos pares candidatos totales).
 
     Args:
         posiciones: Array (N, 2) con las coordenadas (x, y) de cada
@@ -269,57 +364,43 @@ def buscar_vecinos_cim(
     if n < 2:
         return vecinos
 
-    celdas = construir_celdas(posiciones, l, m)
+    # Grilla armada vectorizada (sin loop de Python por partícula ni por
+    # celda): a cada partícula se le asigna un id de celda (fila*M+col),
+    # y se ordena por ese id. `starts`/`ends` delimitan, para cada una de
+    # las M² celdas, el rango de `orden` con sus partículas.
+    tam_celda = l / m
+    col_particula = np.minimum((posiciones[:, 0] / tam_celda).astype(int), m - 1)
+    fila_particula = np.minimum((posiciones[:, 1] / tam_celda).astype(int), m - 1)
+    celda_id_particula = fila_particula * m + col_particula
 
-    # Con M chico (1 o 2) y condiciones periódicas, el wraparound puede
-    # hacer que una celda "se vecine a sí misma" o que dos offsets
-    # distintos apunten a la misma celda vecina (colisión). Se dedupean
-    # los pares de celdas ya procesados para no comparar el mismo par de
-    # partículas más de una vez.
-    pares_celdas_procesados = set()
+    orden = np.argsort(celda_id_particula, kind="stable")
+    cuentas_por_celda = np.bincount(celda_id_particula, minlength=m * m)
+    ends = np.cumsum(cuentas_por_celda)
+    starts = ends - cuentas_por_celda
+
+    todas_las_particulas = np.arange(n)
     candidatos_i: List[np.ndarray] = []
     candidatos_j: List[np.ndarray] = []
 
-    for (fila, col), indices_celda in celdas.items():
-        indices_celda_arr = np.asarray(indices_celda, dtype=int)
+    # Pares dentro de la misma celda: cada partícula contra todas las de
+    # su propia celda (incluida ella misma), filtrando luego i < j.
+    idx_i, idx_j = _expandir_pares_hacia_celda(
+        todas_las_particulas, celda_id_particula, starts, ends, orden
+    )
+    intra_validos = idx_i < idx_j
+    candidatos_i.append(idx_i[intra_validos])
+    candidatos_j.append(idx_j[intra_validos])
 
-        # Pares dentro de la misma celda (i < j para no duplicar).
-        idx_i, idx_j = _pares_indices_intra_celda(indices_celda_arr)
+    # Pares contra celdas vecinas (semi-stencil "hacia adelante"), un
+    # offset a la vez (4 iteraciones constantes, no M²).
+    mapa_vecinas = _mapa_celdas_vecinas(m, periodic)
+    for celda_objetivo_por_celda in mapa_vecinas:
+        celda_objetivo_por_particula = celda_objetivo_por_celda[celda_id_particula]
+        idx_i, idx_j = _expandir_pares_hacia_celda(
+            todas_las_particulas, celda_objetivo_por_particula, starts, ends, orden
+        )
         candidatos_i.append(idx_i)
         candidatos_j.append(idx_j)
-
-        # Pares contra celdas vecinas (semi-stencil "hacia adelante").
-        celda_actual = (fila, col)
-        for d_fila, d_col in _OFFSETS_VECINOS:
-            fila_vecina = fila + d_fila
-            col_vecina = col + d_col
-
-            if periodic:
-                fila_vecina %= m
-                col_vecina %= m
-            elif not (0 <= fila_vecina < m and 0 <= col_vecina < m):
-                continue
-
-            celda_vecina = (fila_vecina, col_vecina)
-
-            if celda_vecina == celda_actual:
-                # M=1 (o wraparound degenerado): ya cubierta por el loop
-                # intra-celda de arriba.
-                continue
-
-            par_celdas = frozenset((celda_actual, celda_vecina))
-            if par_celdas in pares_celdas_procesados:
-                continue
-            pares_celdas_procesados.add(par_celdas)
-
-            indices_vecina = celdas.get(celda_vecina)
-            if not indices_vecina:
-                continue
-
-            indices_vecina_arr = np.asarray(indices_vecina, dtype=int)
-            idx_i, idx_j = _pares_indices_entre_celdas(indices_celda_arr, indices_vecina_arr)
-            candidatos_i.append(idx_i)
-            candidatos_j.append(idx_j)
 
     idx_i = np.concatenate(candidatos_i)
     idx_j = np.concatenate(candidatos_j)
