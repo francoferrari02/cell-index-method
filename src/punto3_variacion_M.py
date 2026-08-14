@@ -32,6 +32,8 @@ def main() -> None:
         [df_intermedio, df_maximo],
         labels=[f"N={N_INTERMEDIO}", f"N={N_MAXIMO}"],
         titulo="Punto 3: tiempo de busqueda de vecinos vs M (CIM)",
+        escala_log_y=True,
+        escala_log_x=True,
     )
     guardar_figura(ax.figure, "punto3_variacion_M")
 

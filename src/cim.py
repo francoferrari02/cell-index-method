@@ -184,6 +184,31 @@ def _pares_vecinos_entre_conjuntos(
     return indices_a[filas], indices_b[cols]
 
 
+def _pares_indices_intra_celda(indices_celda_arr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Índices globales de todos los pares i < j dentro de una misma celda.
+
+    Solo genera índices (barato); no calcula ninguna distancia.
+    """
+    k = indices_celda_arr.size
+    if k < 2:
+        vacio = np.empty(0, dtype=int)
+        return vacio, vacio
+    i_local, j_local = np.triu_indices(k, k=1)
+    return indices_celda_arr[i_local], indices_celda_arr[j_local]
+
+
+def _pares_indices_entre_celdas(
+    indices_a: np.ndarray, indices_b: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Índices globales de todos los pares (a, b) entre dos celdas distintas.
+
+    Producto cartesiano de índices vía repeat/tile (mucho más liviano que
+    np.meshgrid para arrays chicos, que es lo típico por celda); tampoco
+    calcula distancias, solo arma los pares candidatos.
+    """
+    return np.repeat(indices_a, indices_b.size), np.tile(indices_b, indices_a.size)
+
+
 def buscar_vecinos_cim(
     posiciones: np.ndarray,
     radios: np.ndarray,
@@ -196,6 +221,16 @@ def buscar_vecinos_cim(
 
     Dos partículas i, j son vecinas si su distancia borde-borde
     (||centro_i - centro_j|| - (r_i + r_j)) es menor a rc.
+
+    Implementación: primero se recorren las celdas para armar la lista
+    completa de pares candidatos (i, j) de todo el sistema (solo indexado,
+    sin calcular ninguna distancia todavía), y recién al final se hace
+    **una única** operación vectorizada de numpy sobre todos los
+    candidatos juntos. Esto evita pagar el overhead fijo de una llamada a
+    numpy por cada una de las M² celdas: con M grande cada celda tiene
+    pocas partículas, y ese overhead por-celda (no por-partícula) puede
+    dominar sobre el ahorro real de trabajo aritmético si se calculan las
+    distancias celda por celda.
 
     Args:
         posiciones: Array (N, 2) con las coordenadas (x, y) de cada
@@ -230,8 +265,11 @@ def buscar_vecinos_cim(
             f"adyacentes."
         )
 
-    celdas = construir_celdas(posiciones, l, m)
     vecinos: Dict[int, List[int]] = {i: [] for i in range(n)}
+    if n < 2:
+        return vecinos
+
+    celdas = construir_celdas(posiciones, l, m)
 
     # Con M chico (1 o 2) y condiciones periódicas, el wraparound puede
     # hacer que una celda "se vecine a sí misma" o que dos offsets
@@ -239,17 +277,16 @@ def buscar_vecinos_cim(
     # los pares de celdas ya procesados para no comparar el mismo par de
     # partículas más de una vez.
     pares_celdas_procesados = set()
+    candidatos_i: List[np.ndarray] = []
+    candidatos_j: List[np.ndarray] = []
 
     for (fila, col), indices_celda in celdas.items():
         indices_celda_arr = np.asarray(indices_celda, dtype=int)
 
-        # Pares dentro de la misma celda (vectorizado, i < j para no duplicar).
-        idx_i, idx_j = _pares_vecinos_entre_conjuntos(
-            indices_celda_arr, indices_celda_arr, posiciones, radios, l, rc, periodic, misma_celda=True
-        )
-        for i, j in zip(idx_i.tolist(), idx_j.tolist()):
-            vecinos[i].append(j)
-            vecinos[j].append(i)
+        # Pares dentro de la misma celda (i < j para no duplicar).
+        idx_i, idx_j = _pares_indices_intra_celda(indices_celda_arr)
+        candidatos_i.append(idx_i)
+        candidatos_j.append(idx_j)
 
         # Pares contra celdas vecinas (semi-stencil "hacia adelante").
         celda_actual = (fila, col)
@@ -280,19 +317,31 @@ def buscar_vecinos_cim(
                 continue
 
             indices_vecina_arr = np.asarray(indices_vecina, dtype=int)
-            idx_i, idx_j = _pares_vecinos_entre_conjuntos(
-                indices_celda_arr,
-                indices_vecina_arr,
-                posiciones,
-                radios,
-                l,
-                rc,
-                periodic,
-                misma_celda=False,
-            )
-            for i, j in zip(idx_i.tolist(), idx_j.tolist()):
-                vecinos[i].append(j)
-                vecinos[j].append(i)
+            idx_i, idx_j = _pares_indices_entre_celdas(indices_celda_arr, indices_vecina_arr)
+            candidatos_i.append(idx_i)
+            candidatos_j.append(idx_j)
+
+    idx_i = np.concatenate(candidatos_i)
+    idx_j = np.concatenate(candidatos_j)
+
+    if idx_i.size == 0:
+        return vecinos
+
+    # Única pasada vectorizada de numpy sobre TODOS los pares candidatos
+    # del sistema, en vez de una pasada por cada par de celdas.
+    delta = posiciones[idx_i] - posiciones[idx_j]
+    if periodic:
+        delta = delta - l * np.round(delta / l)
+    dist_centros = np.linalg.norm(delta, axis=-1)
+    dist_borde = dist_centros - (radios[idx_i] + radios[idx_j])
+    mascara = dist_borde < rc
+
+    idx_i_final = idx_i[mascara]
+    idx_j_final = idx_j[mascara]
+
+    for i, j in zip(idx_i_final.tolist(), idx_j_final.tolist()):
+        vecinos[i].append(j)
+        vecinos[j].append(i)
 
     return vecinos
 
