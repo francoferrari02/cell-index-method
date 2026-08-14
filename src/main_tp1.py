@@ -14,7 +14,7 @@ import numpy as np
 
 from src.cim import buscar_vecinos_cim, calcular_M_max, medir_tiempo_busqueda
 from src.particles import generar_particulas
-from src.visualize import graficar_particulas, guardar_figura
+from src.visualize import graficar_particulas, guardar_figura, mostrar_interactivo
 
 
 def main(
@@ -27,6 +27,7 @@ def main(
     seed: Optional[int] = None,
     r_min: float = 0.23,
     r_max: float = 0.26,
+    interactive: bool = False,
 ) -> Dict[str, Any]:
     """Corre el flujo completo del punto 1 del TP: generación + CIM + gráfico.
 
@@ -80,6 +81,9 @@ def main(
     print(f"Tiempo de busqueda (CIM, N={n}, M={m}): {tiempo_segundos:.6f} s")
     print(f"{particula_id} {' '.join(str(v) for v in vecinos)}")
 
+    if interactive:
+        mostrar_interactivo(posiciones, radios, l, todos_los_vecinos, mostrar_grilla=True, m=m)
+
     ax = graficar_particulas(
         posiciones,
         radios,
@@ -121,6 +125,11 @@ if __name__ == "__main__":
         "--periodic", action="store_true", help="Usar condiciones de borde periodicas."
     )
     parser.add_argument("--seed", type=int, default=None, help="Semilla aleatoria.")
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Abre una ventana interactiva: click en una particula para ver sus vecinas.",
+    )
 
     args = parser.parse_args()
 
@@ -132,4 +141,5 @@ if __name__ == "__main__":
         m=args.m,
         periodic=args.periodic,
         seed=args.seed,
+        interactive=args.interactive,
     )

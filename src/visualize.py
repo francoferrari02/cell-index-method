@@ -127,6 +127,61 @@ def guardar_figura(fig: Figure, nombre: str, carpeta: str = "figures") -> str:
     return path
 
 
+def mostrar_interactivo(
+    posiciones: np.ndarray,
+    radios: np.ndarray,
+    l: float,
+    todos_los_vecinos: dict,
+    mostrar_grilla: bool = False,
+    m: Optional[int] = None,
+) -> None:
+    """Muestra una ventana interactiva: al hacer click en una partícula,
+    resalta esa partícula y sus vecinas (según `todos_los_vecinos`).
+
+    Args:
+        posiciones: Array (N, 2) con las coordenadas (x, y) de cada
+            partícula.
+        radios: Array (N,) con el radio de cada partícula.
+        l: Longitud del lado del espacio de simulación (cuadrado L x L).
+        todos_los_vecinos: Diccionario {id_particula: [ids de vecinas]},
+            ya calculado (por ejemplo con `cim.buscar_vecinos_cim`).
+        mostrar_grilla: Si es True (y se pasa `m`), dibuja la grilla de
+            celdas usada por el CIM.
+        m: Cantidad de celdas por lado, usado únicamente si
+            `mostrar_grilla=True`.
+    """
+    fig, ax = plt.subplots(figsize=(6, 6))
+    seleccionada = {"id": None}
+
+    def redibujar():
+        ax.clear()
+        graficar_particulas(
+            posiciones,
+            radios,
+            l,
+            particula_id=seleccionada["id"],
+            vecinos=todos_los_vecinos.get(seleccionada["id"]) if seleccionada["id"] is not None else None,
+            ax=ax,
+            mostrar_grilla=mostrar_grilla,
+            m=m,
+            titulo="Click en una particula para ver sus vecinas",
+        )
+        fig.canvas.draw_idle()
+
+    def al_hacer_click(event):
+        if event.xdata is None or event.ydata is None:
+            return
+        punto = np.array([event.xdata, event.ydata])
+        distancias = np.linalg.norm(posiciones - punto, axis=1) - radios
+        idx_mas_cercano = int(np.argmin(distancias))
+        seleccionada["id"] = idx_mas_cercano
+        redibujar()
+
+    fig.canvas.mpl_connect("button_press_event", al_hacer_click)
+    redibujar()
+    plt.show()
+
+
 if __name__ == "__main__":
     from src.cim import buscar_vecinos_cim, calcular_M_max
     from src.particles import generar_particulas
